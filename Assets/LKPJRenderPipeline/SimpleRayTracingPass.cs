@@ -184,7 +184,7 @@ public class SimpleRayTracingPass
             new GraphicsBuffer(
                 GraphicsBuffer.Target.Structured,
                 MaxPointLights,
-                sizeof(float) * 4 * 2);
+                sizeof(float) * 4);
 
         if (pointLights.Count > 0)
         {
@@ -282,7 +282,7 @@ public class SimpleRayTracingPass
         renderContext.Submit();
 
         // get rid of everything I js baked which is kinda dumb
-        scratch.Dispose();
+        scratch?.Dispose();
 
         normalBuffer.Dispose();
 
