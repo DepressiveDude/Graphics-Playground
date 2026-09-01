@@ -1,0 +1,461 @@
+#include "Packages/com.unity.render-pipelines.core/Runtime/UnifiedRayTracing/TraceRayAndQueryHit.hlsl"
+
+#define MAX_POINT_LIGHTS 128
+
+
+// Scene
+
+UNIFIED_RT_DECLARE_ACCEL_STRUCT(_AccelStruct);
+
+
+// Camera
+
+uint _RenderWidth;
+uint _RenderHeight;
+
+float4 _CameraFrustum;
+float4x4 _CameraToWorldMatrix;
+
+
+// Geometry lookup
+
+// instanceID -> first triangle in _TriangleNormals
+StructuredBuffer<uint> _InstanceTriangleBase;
+
+// One world-space geometric normal per triangle
+StructuredBuffer<float4> _TriangleNormals;
+
+
+// Lights
+//
+// xyz = world position
+// w   = range
+
+StructuredBuffer<float4> _PointLights;
+
+uint _PointLightCount;
+
+
+// Output
+
+RWTexture2D<float4> _OutputTexture;
+
+
+// ray origin offset
+
+float3 OffsetRayOrigin(
+    float3 position,
+    float3 normal)
+{
+    const float originThreshold =
+        1.0 / 32.0;
+
+    const float floatScale =
+        1.0 / 65536.0;
+
+    const float intScale =
+        256.0;
+
+
+    int3 offset =
+        int3(
+            intScale * normal);
+
+
+    float3 integerPosition;
+
+
+    integerPosition.x =
+        asfloat(
+            asint(position.x) +
+            (position.x < 0.0
+                ? -offset.x
+                : offset.x));
+
+
+    integerPosition.y =
+        asfloat(
+            asint(position.y) +
+            (position.y < 0.0
+                ? -offset.y
+                : offset.y));
+
+
+    integerPosition.z =
+        asfloat(
+            asint(position.z) +
+            (position.z < 0.0
+                ? -offset.z
+                : offset.z));
+
+
+    float3 result;
+
+
+    result.x =
+        abs(position.x) < originThreshold
+        ? position.x + floatScale * normal.x
+        : integerPosition.x;
+
+
+    result.y =
+        abs(position.y) < originThreshold
+        ? position.y + floatScale * normal.y
+        : integerPosition.y;
+
+
+    result.z =
+        abs(position.z) < originThreshold
+        ? position.z + floatScale * normal.z
+        : integerPosition.z;
+
+
+    return result;
+}
+
+
+// Camera ray
+
+UnifiedRT::Ray GenerateCameraRay(
+    uint2 pixel,
+    uint2 resolution)
+{
+    float2 uv =
+        (float2(pixel) + 0.5) /
+        float2(resolution);
+
+
+    float3 viewDirection =
+        float3(
+            lerp(
+                _CameraFrustum.x,
+                _CameraFrustum.y,
+                uv.x),
+
+            lerp(
+                _CameraFrustum.z,
+                _CameraFrustum.w,
+                uv.y),
+
+            -1.0
+        );
+
+
+    UnifiedRT::Ray ray;
+
+
+    ray.origin =
+        transpose(
+            _CameraToWorldMatrix)[3].xyz;
+
+
+    ray.direction =
+        normalize(
+            mul(
+                (float3x3)_CameraToWorldMatrix,
+                viewDirection));
+
+
+    ray.tMin =
+        0.001;
+
+
+    ray.tMax =
+        100000.0;
+
+
+    return ray;
+}
+
+
+// Main
+
+void RayGenExecute(
+    UnifiedRT::DispatchInfo dispatchInfo)
+{
+    uint2 pixel =
+        dispatchInfo.dispatchThreadID.xy;
+
+
+    if (pixel.x >= _RenderWidth ||
+        pixel.y >= _RenderHeight)
+    {
+        return;
+    }
+
+
+    UnifiedRT::RayTracingAccelStruct accelStruct =
+        UNIFIED_RT_GET_ACCEL_STRUCT(
+            _AccelStruct);
+
+    UnifiedRT::Ray cameraRay =
+        GenerateCameraRay(
+            pixel,
+            uint2(
+                _RenderWidth,
+                _RenderHeight));
+
+
+    UnifiedRT::Hit surfaceHit =
+        UnifiedRT::TraceRayClosestHit(
+            dispatchInfo,
+            accelStruct,
+            0xFF,
+            cameraRay,
+            UnifiedRT::kRayFlagNone);
+
+
+    // Nothing visible.
+    if (!surfaceHit.IsValid())
+    {
+        _OutputTexture[pixel] =
+            float4(0, 0, 0, 1);
+
+        return;
+    }
+
+    float3 surfacePosition =
+        cameraRay.origin +
+        cameraRay.direction *
+        surfaceHit.hitDistance;
+
+    uint triangleBase =
+        _InstanceTriangleBase[
+            surfaceHit.instanceID];
+
+
+    uint triangleIndex =
+        triangleBase +
+        surfaceHit.primitiveIndex;
+
+
+    float3 geometricNormal =
+        _TriangleNormals[
+            triangleIndex].xyz;
+
+
+    float normalLengthSq =
+        dot(
+            geometricNormal,
+            geometricNormal);
+
+
+    if (normalLengthSq < 1e-12)
+    {
+        geometricNormal =
+            -cameraRay.direction;
+    }
+    else
+    {
+        geometricNormal *=
+            rsqrt(normalLengthSq);
+    }
+
+
+    // Face normal toward the camera-facing side.
+    if (dot(
+            geometricNormal,
+            -cameraRay.direction) < 0.0)
+    {
+        geometricNormal =
+            -geometricNormal;
+    }
+
+    // Check point light validity
+        // Accumulated direct lighting.
+    float3 directLighting = 0.0;
+
+    const float3 lightColor =
+        float3(1.0, 0.9, 0.8);
+
+    // Physical light strength / intensity scale.
+    //
+    // Inverse-square attenuation can become very small at normal
+    // world-space distances, so this controls the overall brightness.
+    const float lightIntensity =
+        10.0;
+
+
+    // Clamp in case CPU and shader ever get out of sync.
+    uint lightCount =
+        min(
+            _PointLightCount,
+            (uint)MAX_POINT_LIGHTS);
+
+
+    for (uint i = 0;
+         i < lightCount;
+         ++i)
+    {
+        float4 lightData =
+            _PointLights[i];
+
+
+        float3 lightPosition =
+            lightData.xyz;
+
+
+        float lightRange =
+            lightData.w;
+
+
+        float3 toLight =
+            lightPosition -
+            surfacePosition;
+
+
+        float distanceSq =
+            dot(
+                toLight,
+                toLight);
+
+
+        // Avoid division by zero.
+        if (distanceSq <= 1e-12)
+        {
+            continue;
+        }
+
+
+        float distanceToLight =
+            sqrt(distanceSq);
+
+
+        // Hard range cutoff.
+        if (distanceToLight > lightRange)
+        {
+            continue;
+        }
+
+
+        float3 directionToLight =
+            toLight /
+            distanceToLight;
+
+
+        // Lambert cosine term.
+        float NdotL =
+            saturate(
+                dot(
+                    geometricNormal,
+                    directionToLight));
+
+
+        if (NdotL <= 0.0)
+        {
+            continue;
+        }
+
+
+        // Move the secondary ray away from the actual triangle plane.
+        float3 shadowOrigin =
+            OffsetRayOrigin(
+                surfacePosition,
+                geometricNormal);
+
+
+        // Recalculate from the offset position.
+        float3 offsetToLight =
+            lightPosition -
+            shadowOrigin;
+
+
+        float shadowDistanceSq =
+            dot(
+                offsetToLight,
+                offsetToLight);
+
+
+        if (shadowDistanceSq <= 1e-12)
+        {
+            continue;
+        }
+
+
+        float shadowDistance =
+            sqrt(
+                shadowDistanceSq);
+
+
+        float3 shadowDirection =
+            offsetToLight /
+            shadowDistance;
+
+
+        // Shadow ray.
+        UnifiedRT::Ray shadowRay;
+
+
+        shadowRay.origin =
+            shadowOrigin;
+
+
+        shadowRay.direction =
+            shadowDirection;
+
+
+        shadowRay.tMin =
+            0.0;
+
+
+        // Stop slightly before the light so geometry at exactly the
+        // light position does not count as an occluder.
+        shadowRay.tMax =
+            max(
+                0.0,
+                shadowDistance - 0.0001);
+
+
+        bool blocked =
+            UnifiedRT::TraceRayAnyHit(
+                dispatchInfo,
+                accelStruct,
+                0xFF,
+                shadowRay,
+                UnifiedRT::kRayFlagNone);
+
+
+        if (blocked)
+        {
+            continue;
+        }
+
+
+        // Inverse-square law:
+        //
+        // irradiance ∝ 1 / r²
+        //
+        // Clamp the denominator very close to the light to prevent
+        // numerical explosions if geometry intersects the light.
+        float attenuation =
+            1.0 /
+            max(
+                distanceSq,
+                0.01);
+
+
+        float3 contribution =
+            lightColor *
+            lightIntensity *
+            attenuation *
+            NdotL;
+
+
+        directLighting +=
+            contribution;
+    }
+
+
+    float3 ambient = 0;
+
+
+    float3 finalColor =
+        ambient +
+        directLighting;
+
+
+    _OutputTexture[pixel] =
+        float4(
+            finalColor,
+            1.0);
+}
