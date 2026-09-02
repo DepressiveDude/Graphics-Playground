@@ -103,9 +103,7 @@ public class LKPJRenderPipeline : RenderPipeline
             // the ray traced red/black visibility image.
             
 
-            EnsureRayTracingOutput(
-                camera.pixelWidth,
-                camera.pixelHeight);
+            EnsureRayTracingOutput(camera.pixelWidth, camera.pixelHeight);
 
 
             rayTracing.Render(
@@ -123,9 +121,7 @@ public class LKPJRenderPipeline : RenderPipeline
                 CommandBufferPool.Get(
                     "Ray Tracing Output");
 
-            blitCmd.Blit(
-                rayTracingOutput,
-                BuiltinRenderTextureType.CameraTarget);
+            blitCmd.Blit(rayTracingOutput,BuiltinRenderTextureType.CameraTarget);
 
             context.ExecuteCommandBuffer(
                 blitCmd);
