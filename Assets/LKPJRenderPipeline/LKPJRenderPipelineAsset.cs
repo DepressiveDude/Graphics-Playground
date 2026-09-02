@@ -6,8 +6,7 @@ using UnityEngine.Rendering;
 public class LKPJRenderPipelineAsset : RenderPipelineAsset<LKPJRenderPipeline>
 {
     // This data can be defined in the Inspector for each Render Pipeline Asset
-    public Color exampleColor;
-    public string exampleString;
+    public int maxLights = 64;
 
         // Unity calls this method before rendering the first frame.
        // If a setting on the Render Pipeline Asset changes, Unity destroys the current Render Pipeline Instance and calls this method again before rendering the next frame.

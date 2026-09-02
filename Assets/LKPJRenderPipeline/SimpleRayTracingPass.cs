@@ -126,7 +126,6 @@ public class SimpleRayTracingPass
 #endif
     }
 
-    // some normal render code to put stuff on screen
     public void Render(
         ScriptableRenderContext renderContext,
         Camera camera,
@@ -301,8 +300,7 @@ public class SimpleRayTracingPass
 
 
         MeshRenderer[] renderers =
-            Object.FindObjectsByType<MeshRenderer>(
-                FindObjectsSortMode.None);
+            Object.FindObjectsByType<MeshRenderer>();
 
         // For each object process it to be added to the ray tracing acceleration structure
         foreach (MeshRenderer renderer in renderers)
